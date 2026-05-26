@@ -83,6 +83,9 @@ pub enum ColorPickerUpdate {
     Copied(Instant),
     Cancel,
     ToggleColorPicker,
+    InputR(String),
+    InputG(String),
+    InputB(String),
 }
 
 #[derive(Setters)]
@@ -106,6 +109,12 @@ pub struct ColorPickerModel {
     must_clear_cache: Rc<AtomicBool>,
     #[setters(skip)]
     copied_at: Option<Instant>,
+    #[setters(skip)]
+    input_r: String,
+    #[setters(skip)]
+    input_g: String,
+    #[setters(skip)]
+    input_b: String,
 }
 
 impl ColorPickerModel {
@@ -119,6 +128,7 @@ impl ColorPickerModel {
         let initial = initial_color.or(fallback_color);
         let initial_srgb = palette::Srgb::from(initial.unwrap_or(Color::BLACK));
         let hsv = palette::Hsv::from_color(initial_srgb);
+        let (ir, ig, ib) = hsv_to_rgb_strings(hsv);
         Self {
             segmented_model: segmented_button::Model::builder()
                 .insert(move |b| b.text(hex.clone()).activate())
@@ -134,6 +144,9 @@ impl ColorPickerModel {
             height: Length::Fixed(200.0),
             must_clear_cache: Rc::new(AtomicBool::new(false)),
             copied_at: None,
+            input_r: ir,
+            input_g: ig,
+            input_b: ib,
         }
     }
 
@@ -168,6 +181,10 @@ impl ColorPickerModel {
             ColorPickerUpdate::ActiveColor(c) => {
                 self.must_clear_cache.store(true, Ordering::SeqCst);
                 self.input_color = color_to_string(c, self.is_hex());
+                let (r, g, b) = hsv_to_rgb_strings(c);
+                self.input_r = r;
+                self.input_g = g;
+                self.input_b = b;
                 self.active_color = c;
                 self.copied_at = None;
             }
@@ -178,10 +195,19 @@ impl ColorPickerModel {
                 }
                 self.applied_color = Some(Color::from(srgb));
                 self.active = false;
+                self.input_color = color_to_string(self.active_color, self.is_hex());
+                let (r, g, b) = hsv_to_rgb_strings(self.active_color);
+                self.input_r = r;
+                self.input_g = g;
+                self.input_b = b;
             }
             ColorPickerUpdate::ActivateSegmented(e) => {
                 self.segmented_model.activate(e);
                 self.input_color = color_to_string(self.active_color, self.is_hex());
+                let (r, g, b) = hsv_to_rgb_strings(self.active_color);
+                self.input_r = r;
+                self.input_g = g;
+                self.input_b = b;
                 self.copied_at = None;
             }
             ColorPickerUpdate::Copied(t) => {
@@ -196,6 +222,11 @@ impl ColorPickerModel {
                 let hsv = palette::Hsv::from_color(initial_srgb);
                 self.active_color = hsv;
                 self.applied_color = self.fallback_color;
+                self.input_color = color_to_string(hsv, self.is_hex());
+                let (r, g, b) = hsv_to_rgb_strings(hsv);
+                self.input_r = r;
+                self.input_g = g;
+                self.input_b = b;
                 self.copied_at = None;
             }
             ColorPickerUpdate::Cancel => {
@@ -209,16 +240,53 @@ impl ColorPickerModel {
 
                 self.input_color = c;
                 self.copied_at = None;
-                // parse as rgba or hex and update active color
-                if let Ok(c) = self.input_color.parse::<css_color::Srgb>() {
-                    self.active_color =
-                        palette::Hsv::from_color(palette::Srgb::new(c.red, c.green, c.blue));
+                // Only parse if the input matches the expected format for the active tab,
+                // preventing named CSS colors from being silently accepted in hex mode
+                // and bare numbers from being silently accepted in RGB mode.
+                let lowered = self.input_color.trim().to_ascii_lowercase();
+                let format_matches = if self.is_hex() {
+                    lowered.starts_with('#')
+                } else {
+                    lowered.starts_with("rgb(") || lowered.starts_with("rgba(")
+                };
+                if format_matches {
+                    if let Ok(c) = self.input_color.parse::<css_color::Srgb>() {
+                        self.active_color =
+                            palette::Hsv::from_color(palette::Srgb::new(c.red, c.green, c.blue));
+                    }
                 }
             }
             ColorPickerUpdate::ToggleColorPicker => {
                 self.must_clear_cache.store(true, Ordering::SeqCst);
                 self.active = !self.active;
                 self.copied_at = None;
+            }
+            ColorPickerUpdate::InputR(s) => {
+                self.must_clear_cache.store(true, Ordering::SeqCst);
+                self.input_r = s;
+                self.copied_at = None;
+                if let Some(hsv) = try_parse_rgb(&self.input_r, &self.input_g, &self.input_b) {
+                    self.active_color = hsv;
+                    self.input_color = color_to_string(hsv, true);
+                }
+            }
+            ColorPickerUpdate::InputG(s) => {
+                self.must_clear_cache.store(true, Ordering::SeqCst);
+                self.input_g = s;
+                self.copied_at = None;
+                if let Some(hsv) = try_parse_rgb(&self.input_r, &self.input_g, &self.input_b) {
+                    self.active_color = hsv;
+                    self.input_color = color_to_string(hsv, true);
+                }
+            }
+            ColorPickerUpdate::InputB(s) => {
+                self.must_clear_cache.store(true, Ordering::SeqCst);
+                self.input_b = s;
+                self.copied_at = None;
+                if let Some(hsv) = try_parse_rgb(&self.input_r, &self.input_g, &self.input_b) {
+                    self.active_color = hsv;
+                    self.input_color = color_to_string(hsv, true);
+                }
             }
         }
         Task::none()
@@ -255,6 +323,9 @@ impl ColorPickerModel {
             height: self.height,
             must_clear_cache: self.must_clear_cache.clone(),
             input_color: &self.input_color,
+            input_r: &self.input_r,
+            input_g: &self.input_g,
+            input_b: &self.input_b,
             reset_label: None,
             save_label: None,
             cancel_label: None,
@@ -271,6 +342,12 @@ pub struct ColorPickerBuilder<'a, Message> {
     active_color: palette::Hsv,
     #[setters(skip)]
     input_color: &'a str,
+    #[setters(skip)]
+    input_r: &'a str,
+    #[setters(skip)]
+    input_g: &'a str,
+    #[setters(skip)]
+    input_b: &'a str,
     #[setters(skip)]
     on_update: fn(ColorPickerUpdate) -> Message,
     #[setters(skip)]
@@ -317,6 +394,67 @@ where
 
         let on_update = self.on_update;
         let spacing = THEME.lock().unwrap().cosmic().spacing;
+        let is_hex = self.model.position(self.model.active()) == Some(0);
+
+        let color_input: Element<'a, Message> = if is_hex {
+            text_input("", self.input_color)
+                .on_input(move |s| on_update(ColorPickerUpdate::Input(s)))
+                .on_paste(move |s| on_update(ColorPickerUpdate::Input(s)))
+                .on_submit(move |_| on_update(ColorPickerUpdate::ActionFinished))
+                .leading_icon(
+                    color_button(
+                        None,
+                        Some(Color::from(palette::Srgb::from_color(self.active_color))),
+                        Length::FillPortion(12),
+                    )
+                    .into(),
+                )
+                .trailing_icon({
+                    let button = button::custom(crate::widget::icon(
+                        from_name("edit-copy-symbolic").size(spacing.space_s).into(),
+                    ))
+                    .on_press(on_update(ColorPickerUpdate::Copied(Instant::now())))
+                    .class(Button::Text);
+
+                    match self.copied_at.take() {
+                        Some(t) if Instant::now().duration_since(t) > Duration::from_secs(2) => {
+                            button.into()
+                        }
+                        Some(_) => tooltip(
+                            button,
+                            text(copied_to_clipboard_label),
+                            iced_widget::tooltip::Position::Bottom,
+                        )
+                        .into(),
+                        None => tooltip(
+                            button,
+                            text(copy_to_clipboard_label),
+                            iced_widget::tooltip::Position::Bottom,
+                        )
+                        .into(),
+                    }
+                })
+                .width(self.width)
+                .into()
+        } else {
+            row![
+                text_input("R", self.input_r)
+                    .on_input(move |s| on_update(ColorPickerUpdate::InputR(s)))
+                    .on_submit(move |_| on_update(ColorPickerUpdate::ActionFinished))
+                    .width(Length::Fill),
+                text_input("G", self.input_g)
+                    .on_input(move |s| on_update(ColorPickerUpdate::InputG(s)))
+                    .on_submit(move |_| on_update(ColorPickerUpdate::ActionFinished))
+                    .width(Length::Fill),
+                text_input("B", self.input_b)
+                    .on_input(move |s| on_update(ColorPickerUpdate::InputB(s)))
+                    .on_submit(move |_| on_update(ColorPickerUpdate::ActionFinished))
+                    .width(Length::Fill),
+            ]
+            .spacing(spacing.space_xs)
+            .width(self.width)
+            .into()
+        };
 
         let mut inner = column![
             // segmented buttons
@@ -327,7 +465,6 @@ where
                 .minimum_button_width(0)
                 .width(self.width),
             // canvas with gradient for the current color
-            // still needs the canvas and the handle to be drawn on it
             container(vertical().height(self.height))
                 .width(self.width)
                 .height(self.height),
@@ -383,48 +520,7 @@ where
                 }),
             })
             .width(self.width),
-            text_input("", self.input_color)
-                .on_input(move |s| on_update(ColorPickerUpdate::Input(s)))
-                .on_paste(move |s| on_update(ColorPickerUpdate::Input(s)))
-                .on_submit(move |_| on_update(ColorPickerUpdate::ActionFinished))
-                // .on_unfocus(on_update(ColorPickerUpdate::ActionFinished)) Somehow this is called even when the field wasn't previously focused
-                .leading_icon(
-                    color_button(
-                        None,
-                        Some(Color::from(palette::Srgb::from_color(self.active_color))),
-                        Length::FillPortion(12)
-                    )
-                    .into()
-                )
-                // TODO copy paste input contents
-                .trailing_icon({
-                    let button = button::custom(crate::widget::icon(
-                        from_name("edit-copy-symbolic").size(spacing.space_s).into(),
-                    ))
-                    .on_press(on_update(ColorPickerUpdate::Copied(Instant::now())))
-                    .class(Button::Text);
-
-                    match self.copied_at.take() {
-                        Some(t) if Instant::now().duration_since(t) > Duration::from_secs(2) => {
-                            button.into()
-                        }
-                        Some(_) => tooltip(
-                            button,
-                            text(copied_to_clipboard_label),
-                            iced_widget::tooltip::Position::Bottom,
-                        )
-                        .into(),
-                        None => tooltip(
-                            button,
-                            text(copy_to_clipboard_label),
-                            iced_widget::tooltip::Position::Bottom,
-                        )
-                        .into(),
-                    }
-                })
-                .width(self.width),
         ]
-        // Should we ensure the side padding is at least half the width of the handle?
         .padding([
             spacing.space_none,
             spacing.space_s,
@@ -432,6 +528,8 @@ where
             spacing.space_s,
         ])
         .spacing(spacing.space_s);
+
+        inner = inner.push(color_input);
 
         if !self.recent_colors.is_empty() {
             inner = inner.push(horizontal::light().width(self.width));
@@ -793,6 +891,29 @@ impl State {
 }
 
 impl<Message> ColorPicker<'_, Message> where Message: Clone + 'static {}
+
+fn hsv_to_rgb_strings(c: palette::Hsv) -> (String, String, String) {
+    let srgb = palette::Srgb::from_color(c).into_format::<u8>();
+    (
+        srgb.red.to_string(),
+        srgb.green.to_string(),
+        srgb.blue.to_string(),
+    )
+}
+
+fn try_parse_rgb(r: &str, g: &str, b: &str) -> Option<palette::Hsv> {
+    let parse = |s: &str| -> Option<f32> {
+        let v: u32 = s.trim().parse().ok()?;
+        if v <= 255 {
+            Some(v as f32 / 255.0)
+        } else {
+            None
+        }
+    };
+    let srgb = palette::Srgb::new(parse(r)?, parse(g)?, parse(b)?);
+    Some(palette::Hsv::from_color(srgb))
+}
+
 // TODO convert active color to hex or rgba
 fn color_to_string(c: palette::Hsv, is_hex: bool) -> String {
     let srgb = palette::Srgb::from_color(c);
